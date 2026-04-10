@@ -1,0 +1,16 @@
+{
+  "job_id": "ftjob-wrY9joDaQvygTvoCIqceHvIJ",
+  "model": "gpt-4.1-2025-04-14",
+  "train_rows": 160,
+  "val_rows": 40,
+  "train_file_id": "file-Bs6oknDDg7G56jtFFQ696A",
+  "val_file_id": "file-7rzpvpJFtenPe5YGpx5MXM",
+  "hyperparameters": {
+    "n_epochs": 3,
+    "batch_size": 4,
+    "lr_mult": 0.5
+  },
+  "suffix": "dw_collusion_ordinal_rag200",
+  "launched_at": "2026-03-19T00:38:25.114450",
+  "status": "validating_files"
+}

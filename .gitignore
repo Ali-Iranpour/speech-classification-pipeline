@@ -1,0 +1,40 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Third-party infra (has its own git repo)
+infra/llama.cpp/
+
+# Build artifacts
+build/
+*.o
+*.so
+*.a
+
+# Temporary files
+*/temp/
+temp/
+
+# IDE / local config
+.vscode/
+.vscode-server/
+.mplconfig/
+*.Rhistory
+
+# Cache
+.cache/
+**/.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+models/
+apps/matlab_to_python/
+.vscode-server
+
+# Data files (uncomment if sensitive)
+# *.xlsx
+# *.jsonl
