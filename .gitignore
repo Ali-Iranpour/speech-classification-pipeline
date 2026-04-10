@@ -20,6 +20,7 @@ temp/
 # IDE / local config
 .vscode/
 .vscode-server/
+.claude/
 .mplconfig/
 *.Rhistory
 
@@ -31,9 +32,14 @@ temp/
 .DS_Store
 Thumbs.db
 
-models/
 apps/matlab_to_python/
-.vscode-server
+.vscode-server/
+
+# Models - keep folder structure, ignore actual model files
+models/**/*.gguf
+models/hf_cache/
+models/installed/**/.cache/
+models/fine_tuned/**
 
 # Data files (uncomment if sensitive)
 # *.xlsx
