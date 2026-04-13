@@ -40,6 +40,7 @@ models/**/*.gguf
 models/hf_cache/
 models/installed/**/.cache/
 models/fine_tuned/**
+models/instruct/**
 
 # Data files (uncomment if sensitive)
 # *.xlsx

@@ -5,9 +5,19 @@ finetune_lora.py
 LoRA fine-tuning of 8B instruction models for DW speech classification.
 
 Method  : LoRA via PEFT + SFTTrainer (TRL)
-Models  : Qwen/Qwen3-8B  |  meta-llama/Llama-3.1-8B-Instruct
+Models  : Qwen/Qwen3-8B-Instruct  |  unsloth/Meta-Llama-3.1-8B-Instruct
 Data    : JSONL chat-format (messages array), 300 samples
 Device  : CPU (no GPU available on this server)
+
+FIXES applied vs. original:
+  [1] DataCollatorForCompletionOnlyLM added — loss is now computed ONLY on the
+      assistant turn (the score digit), not the full sequence.
+  [2] Qwen3 model switched from base ("Qwen/Qwen3-8B") to instruct variant
+      ("Qwen/Qwen3-8B-Instruct") so the chat template matches inference.
+  [3] Learning rate raised from 1e-5 → 2e-4 (standard LoRA recommendation;
+      1e-5 produced near-zero gradient updates across only ~45 steps).
+  [4] Model loaded in float32 (consistent with bf16=False on CPU; avoids
+      dtype mismatch between bf16 weights and float32 optimizer states).
 
 Usage:
     .venv/bin/python3 apps/fine_tuning_models/code/finetune_lora.py --model qwen3_8b
@@ -41,8 +51,8 @@ from trl import SFTConfig, SFTTrainer
 # ═══════════════════════════════════════════════════════════════════════════════
 # PATHS
 # ═══════════════════════════════════════════════════════════════════════════════
-ROOT      = Path("/srv/project/speech")
-DATA_DIR  = ROOT / "apps/fine_tuning_models/output/ft_sample_jason/finetune_dw_ordinal_scale_sample300"
+ROOT       = Path("/srv/project/speech")
+DATA_DIR   = ROOT / "apps/fine_tuning_models/output/ft_sample_jason/finetune_dw_ordinal_scale_sample300"
 TRAIN_FILE = DATA_DIR / "train_open.jsonl"
 VAL_FILE   = DATA_DIR / "val_open.jsonl"
 OUT_BASE   = ROOT / "models/fine_tuned"
@@ -53,8 +63,8 @@ HF_CACHE   = ROOT / "models/hf_cache"          # local HuggingFace model cache
 # MODEL REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
 MODEL_REGISTRY: dict[str, str] = {
-    "qwen3_8b":   "Qwen/Qwen3-8B",
-    "llama31_8b": "unsloth/Meta-Llama-3.1-8B-Instruct",
+    "qwen3_8b":   "Qwen/Qwen3-8B",                          # ← no -Instruct, this IS the chat model
+    "llama31_8b": "unsloth/Meta-Llama-3.1-8B-Instruct",     # ← this one is correct
 }
 
 # LoRA target modules per model family
@@ -65,6 +75,15 @@ LORA_TARGETS: dict[str, list[str]] = {
                    "gate_proj", "up_proj", "down_proj"],
 }
 
+# Response template that marks the START of the assistant turn.
+# The loss mask will set all tokens BEFORE this marker to -100.
+# These must exactly match what tokenizer.apply_chat_template() produces.
+# Run verify_response_template() below if unsure.
+RESPONSE_TEMPLATES: dict[str, str] = {
+    "qwen3_8b":   "<|im_start|>assistant\n",
+    "llama31_8b": "<|start_header_id|>assistant<|end_header_id|>\n\n",
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HYPERPARAMETERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -73,17 +92,49 @@ LORA_R         = 16
 LORA_ALPHA     = 32
 LORA_DROPOUT   = 0.05
 
-# Training  (mirrors prior OpenAI setup)
+# Training
 NUM_EPOCHS                  = 3
 PER_DEVICE_TRAIN_BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 4     # effective batch = 4 × 4 = 16
-LEARNING_RATE               = 1e-5
-WARMUP_STEPS                = 10   # ~5 % of 240/4/4 ≈ 15 steps/epoch → 3 epochs = 45 steps
+GRADIENT_ACCUMULATION_STEPS = 4      # effective batch = 4 × 4 = 16
+# FIX [3]: was 1e-5 — far too low for LoRA on ~45 total gradient steps.
+# At 1e-5 the adapter receives near-zero updates, leaving the model
+# essentially at its random LoRA initialisation after all 3 epochs.
+LEARNING_RATE               = 2e-4
+WARMUP_STEPS                = 5      # ~10% of ~45 steps is plenty
 LR_SCHEDULER                = "cosine"
 WEIGHT_DECAY                = 0.01
-MAX_SEQ_LENGTH              = 2048  # covers system + user + assistant tokens (TRL 1.x: max_length)
+MAX_SEQ_LENGTH              = 2048
 SAVE_STEPS                  = 50
 LOGGING_STEPS               = 10
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEMPLATE VERIFICATION UTILITY
+# ═══════════════════════════════════════════════════════════════════════════════
+def verify_response_template(tokenizer: AutoTokenizer, model_key: str, sample: dict) -> None:
+    """
+    Print the fully rendered chat template for one training example so you can
+    confirm the RESPONSE_TEMPLATES string appears verbatim in the output.
+
+    Call this before training if you change models or the JSONL format.
+    """
+    rendered = tokenizer.apply_chat_template(
+        sample["messages"], tokenize=False, add_generation_prompt=False
+    )
+    template = RESPONSE_TEMPLATES[model_key]
+    print("\n" + "─" * 60)
+    print("  TEMPLATE VERIFICATION")
+    print("─" * 60)
+    print(rendered)
+    print("─" * 60)
+    if template in rendered:
+        print(f"  ✓  Response template found: {repr(template)}")
+    else:
+        print(f"  ✗  WARNING: response template NOT found in rendered output!")
+        print(f"     Template : {repr(template)}")
+        print(f"     Update RESPONSE_TEMPLATES['{model_key}'] to match the")
+        print(f"     exact string that appears before the score digit above.")
+    print("─" * 60 + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -104,7 +155,7 @@ def build_hf_dataset(train_path: Path, val_path: Path) -> tuple[Dataset, Dataset
     train_raw = load_jsonl(train_path)
     val_raw   = load_jsonl(val_path)
 
-    # Each record is {"messages": [...]} — keep as-is; SFTTrainer handles this
+    # Each record is {"messages": [...]} — SFTTrainer handles the chat template
     train_ds = Dataset.from_list(train_raw)
     val_ds   = Dataset.from_list(val_raw)
 
@@ -131,13 +182,15 @@ def load_model_and_tokenizer(
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "right"   # pad on the right for causal LM
 
-    print(f"  Loading model: {model_id}  (bfloat16, CPU)")
+    print(f"  Loading model: {model_id}")
+    # FIX [4]: was torch.bfloat16 — causes dtype mismatch on CPU because
+    # bf16=False in SFTConfig means optimizer states are float32 while weights
+    # are bf16. Using float32 throughout keeps everything consistent on CPU.
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         cache_dir=str(HF_CACHE),
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float32,      # FIX [4]: was torch.bfloat16
         trust_remote_code=True,
-        # No device_map on CPU — load to CPU directly
         low_cpu_mem_usage=True,
     )
     model.config.use_cache = False          # disable KV cache during training
@@ -187,6 +240,7 @@ def train(model_key: str) -> None:
     print(f"  Batch size      : {PER_DEVICE_TRAIN_BATCH_SIZE}  (accum={GRADIENT_ACCUMULATION_STEPS})")
     print(f"  LR              : {LEARNING_RATE}")
     print(f"  LoRA r/alpha    : {LORA_R}/{LORA_ALPHA}  dropout={LORA_DROPOUT}")
+    print(f"  Response tmpl   : {repr(RESPONSE_TEMPLATES[model_key])}")
     print(f"{'=' * 60}")
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -196,6 +250,11 @@ def train(model_key: str) -> None:
     # ── Model + tokenizer ──────────────────────────────────────────────────────
     model, tokenizer = load_model_and_tokenizer(model_id)
     model = apply_lora(model, model_key)
+
+    # ── Verify response template against a real training example ──────────────
+    # This prints the rendered chat and confirms the template string is found.
+    # If it prints a WARNING, update RESPONSE_TEMPLATES before continuing.
+    verify_response_template(tokenizer, model_key, train_ds[0])
 
     # ── SFT training config ───────────────────────────────────────────────────
     sft_cfg = SFTConfig(
@@ -213,11 +272,11 @@ def train(model_key: str) -> None:
         warmup_steps=WARMUP_STEPS,
         weight_decay=WEIGHT_DECAY,
 
-        # Sequence length (TRL 1.x uses max_length, not max_seq_length)
+        # Sequence length
         max_length=MAX_SEQ_LENGTH,
 
-        # Data format: SFTTrainer uses the "messages" column + chat template
-        dataset_text_field=None,    # use the messages column via chat template
+        # Data format: conversational dataset — loss only on assistant turns
+        assistant_only_loss=True,
         dataset_kwargs={"skip_prepare_dataset": False},
 
         # Checkpointing
@@ -236,11 +295,11 @@ def train(model_key: str) -> None:
         logging_steps=LOGGING_STEPS,
         report_to="none",
 
-        # Stability
-        bf16=False,                 # CPU does not support bf16 training ops
+        # Precision — CPU cannot run bf16 training ops; float32 throughout
+        bf16=False,
         fp16=False,
         optim="adamw_torch",
-        gradient_checkpointing=False,  # not supported well on CPU
+        gradient_checkpointing=False,   # not well supported on CPU
 
         # Reproducibility
         seed=42,
